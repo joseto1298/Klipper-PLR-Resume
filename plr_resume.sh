@@ -2,31 +2,29 @@
 # Script: plr_resume.sh
 # Uso: ./plr_resume.sh "<fichero.gcode>" <X> <Y> <Z>
 
-# --- Cargar configuración ---
-# Busca el fichero .conf en el mismo directorio que este script
-CONFIG_FILE="$(dirname "$0")/plr_resume.conf"
-if [ -f "$CONFIG_FILE" ]; then
-    source "$CONFIG_FILE"
-else
-    echo "ADVERTENCIA: No se encontró '$CONFIG_FILE'. Usando valores internos por defecto."
-fi
+# =======================================================
+# Configuración interna
+# =======================================================
 
-# --- Variables ---
-# Usa variables del .conf o valores por defecto si el .conf no existe o no las define
-DIR="${PRINTER_DATA_DIR:-/home/pi/printer_data/gcodes}"
-DEFAULT_TEMP_CAMA=${DEFAULT_TEMP_CAMA:-60}
-DEFAULT_TEMP_EXTRUSOR=${DEFAULT_TEMP_EXTRUSOR:-200}
-DEFAULT_FAN_CMD="${DEFAULT_FAN_CMD:-M107}"
-MOONRAKER_URL="${MOONRAKER_URL:-http://127.0.0.1:7125}"
+PRINTER_DATA_DIR="/home/pi/printer_data/gcodes"
+MOONRAKER_URL="http://127.0.0.1:7125"
+
+DEFAULT_TEMP_CAMA=60
+DEFAULT_TEMP_EXTRUSOR=200
+DEFAULT_FAN_CMD="M107"
+
+# =======================================================
+# Comienzo del script principal
+# =======================================================
 
 # --- Argumentos ---
 FICHERO="$1"
 POS_X="$2"
 POS_Y="$3"
 POS_Z="$4"
-FULLPATH="$DIR/$FICHERO"
+FULLPATH="$PRINTER_DATA_DIR/$FICHERO"
 
-if [ -z "$FULLPATH" ] || [ -z "$POS_X" ] || [ -z "$POS_Y" ] || [ -z "$POS_Z" ]; then
+if [ -z "$FICHERO" ] || [ -z "$POS_X" ] || [ -z "$POS_Y" ] || [ -z "$POS_Z" ]; then
     echo "Uso: $0 <fichero.gcode> <X> <Y> <Z>"
     exit 1
 fi
@@ -37,10 +35,18 @@ if [ ! -f "$FULLPATH" ]; then
 fi
 
 # --- Buscar la línea _PLR_Z Z=$POS_Z ---
-LINEA_Z=$(grep -n "_PLR_Z\s*Z\s*=\s*${POS_Z}" "$FULLPATH" | head -1 | cut -d: -f1)
+LINEA_Z=$(grep -n "_PLR_Z\s*Z\s*=${POS_Z}" "$FULLPATH" | head -1 | cut -d: -f1)
 if [ -z "$LINEA_Z" ]; then
     echo "No se encontró la marca _PLR_Z Z=$POS_Z"
     exit 1
+fi
+
+# --- Línea de la siguiente Z ---
+LINEA_SIG_Z=$(tail -n +$((LINEA_Z+1)) "$FULLPATH" | grep -n "_PLR_Z" | head -1 | cut -d: -f1)
+if [ -n "$LINEA_SIG_Z" ]; then
+    LINEA_SIG_Z=$((LINEA_Z + LINEA_SIG_Z))
+else
+    LINEA_SIG_Z=""
 fi
 
 # --- Buscar parámetros opcionales antes de _PLR_Z ---
@@ -49,10 +55,17 @@ TOTAL_LAYER=$(echo "$LINEA_BEFORE" | grep "SET_PRINT_STATS_INFO TOTAL_LAYER" | t
 CURRENT_LAYER=$(echo "$LINEA_BEFORE" | grep "SET_PRINT_STATS_INFO CURRENT_LAYER" | tail -1)
 ACTIVE_SPOOL=$(echo "$LINEA_BEFORE" | grep "SET_ACTIVE_SPOOL" | tail -1)
 PRESSURE_ADVANCE=$(echo "$LINEA_BEFORE" | grep "SET_PRESSURE_ADVANCE" | tail -1)
-EXTRUDER_TOOL=$(echo "$LINEA_BEFORE" | grep "^T[0-9]+" | tail -1)
+EXTRUDER_TOOL=$(echo "$LINEA_BEFORE" | grep -E "^T[0-9]+" | tail -1)
 
-# --- Buscar la mejor coincidencia de X Y después de LINEA_Z ---
-LINEA_XY=$(tail -n +"$LINEA_Z" "$FULLPATH" | grep -n -E "G1 .*X${POS_X} .*Y${POS_Y}" | head -1 | cut -d: -f1)
+# --- Buscar la mejor coincidencia de X Y entre LINEA_Z y LINEA_SIG_Z ---
+if [ -n "$LINEA_SIG_Z" ]; then
+    BLOCK=$(sed -n "${LINEA_Z},$((LINEA_SIG_Z-1))p" "$FULLPATH")
+else
+    BLOCK=$(tail -n +$LINEA_Z "$FULLPATH")
+fi
+
+LINEA_XY=$(echo "$BLOCK" | grep -n -E "G1 .*X${POS_X} .*Y${POS_Y}" | head -1 | cut -d: -f1)
+
 if [ -z "$LINEA_XY" ]; then
     LINEA="$LINEA_Z"
 else
@@ -69,7 +82,7 @@ TEMP_EXTRUSOR=$(head -n $LINEA "$FULLPATH" | grep -E "M109|M104" | tail -1 | gre
 FAN_CMD=$(head -n $LINEA "$FULLPATH" | grep -E "M106|M107" | tail -1)
 [ -z "$FAN_CMD" ] && FAN_CMD="$DEFAULT_FAN_CMD"
 
-# --- Crear recovery file con "_recovery" al final del nombre ---
+# --- Crear recovery file ---
 DIRNAME=$(dirname "$FULLPATH")
 BASENAME=$(basename "$FULLPATH")
 EXTENSION="${BASENAME##*.}"
@@ -88,18 +101,18 @@ RECOVERY_BASENAME=$(basename "$NUEVO")
     echo "M140 S$TEMP_CAMA"
     echo "M104 S$TEMP_EXTRUSOR"
     echo "$FAN_CMD"
-    
+
     echo "M190 S$TEMP_CAMA"
     echo "M109 S$TEMP_EXTRUSOR"
 
     echo "CLEAN_NOZZLE"
-        
+
     echo "G90"
     echo "G1 X$POS_X Y$POS_Y F6000"
     echo "G1 Z$POS_Z F6000"
-    
+
     echo "_PLR_PRINT_START"
-    
+
     echo "; --- Resumen desde línea original $LINEA ---"
     tail -n +$LINEA "$FULLPATH"
 } > "$NUEVO"
