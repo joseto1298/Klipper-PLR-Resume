@@ -72,12 +72,10 @@ RECOVERY_BASENAME=$(basename "$NUEVO")
     echo "M190 S$TEMP_CAMA"
     echo "M109 S$TEMP_EXTRUSOR"
 
-    echo "CLEAN_NOZZLE"
+    echo "_PLR_AFTER_RECOVERY_ACTIONS"
 
     echo "G90"
     echo "G1 Z$POS_Z F6000"
-
-    echo "_PLR_PRINT_START"
 
     echo "; --- Resumen desde línea original $LINEA_Z ---"
     tail -n +$LINEA_Z "$FULLPATH"
