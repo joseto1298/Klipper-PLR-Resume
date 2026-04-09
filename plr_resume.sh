@@ -1,7 +1,6 @@
 #!/bin/bash
-# Script: plr_resume.sh
-# Uso: ./plr_resume.sh "<fichero.gcode>" <Z>
 
+# --- Configuración de rutas ---
 PRINTER_DATA_DIR="/home/pi/printer_data/gcodes"
 MOONRAKER_URL="http://127.0.0.1:7125"
 
@@ -11,82 +10,85 @@ DEFAULT_FAN_CMD="M107"
 
 # --- Argumentos ---
 FICHERO="$1"
-POS_Z="$2"
+BYTE_POS="$2"
+POS_Z="$3"
 FULLPATH="$PRINTER_DATA_DIR/$FICHERO"
 
-if [ -z "$FICHERO" ] || [ -z "$POS_Z" ]; then
-    echo "Uso: $0 <fichero.gcode> <Z>"
+if [ -z "$FICHERO" ] || [ -z "$BYTE_POS" ]; then
+    echo "ERROR: Argumentos insuficientes"
     exit 1
 fi
 
-if [ ! -f "$FULLPATH" ]; then
-    echo "ERROR: fichero no encontrado: $FULLPATH"
-    exit 1
+# 1. AJUSTE DE SEGURIDAD: Encontrar el inicio de la línea
+# Leemos un pequeño bloque (64 bytes) antes del BYTE_POS y buscamos el último salto de línea
+# Esto garantiza que el puntero se mueva al principio de la línea donde ocurrió el fallo.
+AJUSTE_BYTE=$(head -c "$BYTE_POS" "$FULLPATH" | grep -aob "$" | tail -1 | cut -d: -f1)
+
+if [ -n "$AJUSTE_BYTE" ]; then
+    # El nuevo punto de inicio es justo después del último salto de línea encontrado
+    FINAL_BYTE=$((AJUSTE_BYTE + 1))
+else
+    # Si no hay salto de línea previo (muy raro), usamos el original
+    FINAL_BYTE=$BYTE_POS
 fi
 
-# --- Buscar la línea _PLR_Z Z=$POS_Z ---
-LINEA_Z=$(grep -n "_PLR_Z\s*Z\s*=${POS_Z}" "$FULLPATH" | head -1 | cut -d: -f1)
-if [ -z "$LINEA_Z" ]; then
-    echo "No se encontró la marca _PLR_Z Z=$POS_Z"
-    exit 1
-fi
+# 2. Obtener el encabezado completo hasta el punto ajustado
+HEADER_CHUNK=$(head -c "$FINAL_BYTE" "$FULLPATH")
 
-# --- Buscar parámetros opcionales antes de _PLR_Z ---
-LINEA_BEFORE=$(head -n $((LINEA_Z-1)) "$FULLPATH")
-TOTAL_LAYER=$(echo "$LINEA_BEFORE" | grep "SET_PRINT_STATS_INFO TOTAL_LAYER" | tail -1)
-CURRENT_LAYER=$(echo "$LINEA_BEFORE" | grep "SET_PRINT_STATS_INFO CURRENT_LAYER" | tail -1)
-ACTIVE_SPOOL=$(echo "$LINEA_BEFORE" | grep "SET_ACTIVE_SPOOL" | tail -1)
-PRESSURE_ADVANCE=$(echo "$LINEA_BEFORE" | grep "SET_PRESSURE_ADVANCE" | tail -1)
-EXTRUDER_TOOL=$(echo "$LINEA_BEFORE" | grep -E "^T[0-9]+" | tail -1)
+# 3. EXTRAER METADATOS (Header, Thumbnails, Exclude Objects)
+HEADERS=$(echo "$HEADER_CHUNK" | sed -n '/; HEADER_BLOCK_START/,/; HEADER_BLOCK_END/p')
+THUMBNAILS=$(echo "$HEADER_CHUNK" | sed -n '/; THUMBNAIL_BLOCK_START/,/; THUMBNAIL_BLOCK_END/p')
+EXCLUDE_OBJECTS=$(echo "$HEADER_CHUNK" | grep "EXCLUDE_OBJECT_DEFINE")
 
-echo "Línea de corte: $LINEA_Z"
+# 4. Buscar parámetros de estado
+TOTAL_LAYER=$(echo "$HEADER_CHUNK" | grep "SET_PRINT_STATS_INFO TOTAL_LAYER" | tail 0)
+CURRENT_LAYER=$(echo "$HEADER_CHUNK" | grep "SET_PRINT_STATS_INFO CURRENT_LAYER" | tail -1)
+TEMP_CAMA=$(echo "$HEADER_CHUNK" | grep -E "M190|M140" | tail -1 | grep -oP "S[0-9.]+" | tr -d 'S')
+TEMP_EXTRUSOR=$(echo "$HEADER_CHUNK" | grep -E "M109|M104" | tail -1 | grep -oP "S[0-9.]+" | tr -d 'S')
+FAN_CMD=$(echo "$HEADER_CHUNK" | grep -E "M106|M107" | tail -1)
 
-# --- Recuperar temperaturas y ventilador ---
-TEMP_CAMA=$(head -n $LINEA_Z "$FULLPATH" | grep -E "M190|M140" | tail -1 | grep -oP "S[0-9]+" | tr -d 'S')
-TEMP_EXTRUSOR=$(head -n $LINEA_Z "$FULLPATH" | grep -E "M109|M104" | tail -1 | grep -oP "S[0-9]+" | tr -d 'S')
 [ -z "$TEMP_CAMA" ] && TEMP_CAMA=$DEFAULT_TEMP_CAMA
 [ -z "$TEMP_EXTRUSOR" ] && TEMP_EXTRUSOR=$DEFAULT_TEMP_EXTRUSOR
-FAN_CMD=$(head -n $LINEA_Z "$FULLPATH" | grep -E "M106|M107" | tail -1)
 [ -z "$FAN_CMD" ] && FAN_CMD="$DEFAULT_FAN_CMD"
 
-# --- Crear recovery file ---
+# --- Crear archivo de recuperación ---
 DIRNAME=$(dirname "$FULLPATH")
 BASENAME=$(basename "$FULLPATH")
-EXTENSION="${BASENAME##*.}"
-NAME="${BASENAME%.*}"
-NUEVO="${DIRNAME}/${NAME}_recovery.${EXTENSION}"
+NUEVO="${DIRNAME}/RECOVERY_${BASENAME}"
 RECOVERY_BASENAME=$(basename "$NUEVO")
 
 {
-    echo "; === POWER LOSS RECOVERY FILE ==="
-    [ -n "$TOTAL_LAYER" ] && echo "$TOTAL_LAYER"
-    [ -n "$CURRENT_LAYER" ] && echo "$CURRENT_LAYER"
-    [ -n "$ACTIVE_SPOOL" ] && echo "$ACTIVE_SPOOL"
-    [ -n "$PRESSURE_ADVANCE" ] && echo "$PRESSURE_ADVANCE"
-    [ -n "$EXTRUDER_TOOL" ] && echo "$EXTRUDER_TOOL"
-
-    echo "M140 S$TEMP_CAMA"
-    echo "M104 S$TEMP_EXTRUSOR"
-    echo "$FAN_CMD"
+    echo "; ##################################################"
+    echo "; # PLR RECOVERY - SAFE LINE START                 #"
+    echo "; ##################################################"
+    
+    [ -n "$HEADERS" ] && echo "$HEADERS"
+    [ -n "$THUMBNAILS" ] && echo "$THUMBNAILS"
+    [ -n "$EXCLUDE_OBJECTS" ] && echo "$EXCLUDE_OBJECTS"
 
     echo "M190 S$TEMP_CAMA"
     echo "M109 S$TEMP_EXTRUSOR"
-
+    echo "$FAN_CMD"
+        
+    echo "G90 ; Absolutas"
+    echo "M83 ; Extrusión relativa"
+    echo "G1 Z$POS_Z F3000"
+    
     echo "_PLR_AFTER_RECOVERY_ACTIONS"
+    echo "; --- DATA START ---"
 
-    echo "G90"
-    echo "G1 Z$POS_Z F6000"
+    # Retomar desde el byte ajustado al inicio de línea
+    tail -c +"$FINAL_BYTE" "$FULLPATH"
 
-    echo "; --- Resumen desde línea original $LINEA_Z ---"
-    tail -n +$LINEA_Z "$FULLPATH"
 } > "$NUEVO"
 
-# --- Enviar recovery a Moonraker ---
+# --- Notificar a Moonraker ---
 if [ -f "$NUEVO" ]; then
     nohup curl -s -X POST -H "Content-Type: application/json" \
       -d "{\"script\": \"_PLR_AUTO_PRINT_RECOVERY FILE=\\\"${RECOVERY_BASENAME}\\\"\"}" \
       "$MOONRAKER_URL/printer/gcode/script" >/dev/null 2>&1 &
-    echo "Moonraker start-request enviado (async) para: $RECOVERY_BASENAME"
+    echo "Success: Archivo generado comenzando en línea limpia."
 else
-    echo "ERROR: recovery file no encontrado: $NUEVO"
+    echo "ERROR"
+    exit 1
 fi
