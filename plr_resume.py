@@ -164,7 +164,7 @@ def generar_archivo_recuperacion(original_fullpath, filename, byte_pos, z_pos, e
 
         # Descenso a pieza
         out.write(f"G1 Z{z_pos + 2.0} F3000 ; Aproximación rápida\n")
-        out.write(f"G1 Z{z_pos + 0.2} F300 ; Aproximación lenta anti-impacto\n") 
+        out.write(f"G1 Z{z_pos} F300 ; Aproximación lenta anti-impacto\n") 
 
         # Sincronización de Extrusión
         if estado['e_mode'] == "M82":
