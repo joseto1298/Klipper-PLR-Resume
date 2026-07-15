@@ -200,6 +200,8 @@ Klipper-PLR-Resume/
     ║  tool       ← T0              ║
     ║  filament   ← FILAMENT ID=0   ║
     ║  e_mode     ← M83             ║
+    ║  feedrate   ← G1 ... F6000    ║
+    ║  m220       ← M220 S100       ║
     ╚═══════════════╤═══════════════╝
                     │
     ╔═══════════════╧═══════════════╗
@@ -301,6 +303,13 @@ Klipper-PLR-Resume/
 │ Si M83 (relativo):                      │
 │   G92 E0       ← resetea a 0           │
 │   M83          ← modo relativo         │
+├─────────────────────────────────────────┤
+│ ; RESTAURAR VELOCIDAD                   │
+│                                         │
+│ M220 S120       ← override velocidad   │
+│                  (solo si ≠ 100)        │
+│ G1 F6000        ← feedrate base        │
+│                  (extraído del G-code)  │
 ├─────────────────────────────────────────┤
 │ ; CONTINUACIÓN ORIGINAL                 │
 │                                         │

@@ -197,6 +197,12 @@ def generar_archivo_recuperacion(original_fullpath, filename, byte_pos, z_pos, e
         else:
             out.write("G92 E0\nM83\n")
 
+        if estado.get('m220') and estado['m220'] != "100":
+            out.write(f"M220 S{estado['m220']} ; Restaurar override de velocidad\n")
+
+        if estado.get('feedrate'):
+            out.write(f"G1 F{estado['feedrate']} ; Restaurar feedrate base\n")
+
         out.write("\n; ########## CONTINUACIÓN ORIGINAL ##########\n")
         with open(original_fullpath, 'r', encoding='utf-8') as original:
             original.seek(byte_limpio)
@@ -244,6 +250,8 @@ def main():
         'obj_activo': buscar_ultimo_estado(fullpath, byte_pos, r'EXCLUDE_OBJECT_START NAME=([^;\n\r]*)'),
         'tool': buscar_ultimo_estado(fullpath, byte_pos, r'^T\d+'),
         'e_mode': buscar_ultimo_estado(fullpath, byte_pos, r'(M8[23])', "M83"),
+        'feedrate': buscar_ultimo_estado(fullpath, byte_pos, r'G[0123].*?F(\d+\.?\d*)', ""),
+        'm220': buscar_ultimo_estado(fullpath, byte_pos, r'M220\s+S(\d+)', "100"),
     }
 
     # Limpieza de temperaturas
@@ -251,6 +259,14 @@ def main():
         if estado.get(k):
             match = re.findall(r'(\d+\.?\d*)', str(estado[k]))
             estado[k] = match[-1] if match else None
+
+    if estado.get('feedrate'):
+        f_match = re.findall(r'F(\d+\.?\d*)', str(estado['feedrate']))
+        estado['feedrate'] = f_match[-1] if f_match else ""
+
+    if estado.get('m220'):
+        m_match = re.findall(r'S(\d+)', str(estado['m220']))
+        estado['m220'] = m_match[-1] if m_match else "100"
 
     linea_start = buscar_desde_principio(fullpath, r'START_PRINT\s+.*', max_bytes=200000)
 
