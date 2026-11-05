@@ -321,7 +321,7 @@ def main():
         respuesta = requests.post(
             MOONRAKER_URL,
             json={"script": f'_PLR_AUTO_PRINT_RECOVERY FILE="{rec_file}"'},
-            timeout=10,
+            timeout=30,
         )
         respuesta.raise_for_status()
         logger.info("Rescate exitoso: %s", rec_file)
