@@ -321,10 +321,14 @@ def main():
         respuesta = requests.post(
             MOONRAKER_URL,
             json={"script": f'_PLR_AUTO_PRINT_RECOVERY FILE="{rec_file}"'},
-            timeout=30,
+            timeout=3,
         )
         respuesta.raise_for_status()
         logger.info("Rescate exitoso: %s", rec_file)
+    except requests.exceptions.ReadTimeout:
+        # Klipper esta bloqueado ejecutando este mismo script (RUN_SHELL_COMMAND):
+        # el comando ya esta encolado y se ejecutara al salir.
+        logger.info("Comando encolado (Klipper ocupado con el script): %s", rec_file)
     except Exception as e:
         logger.error("Archivo generado: %s (Error Moonraker: %s)", rec_file, e)
         sys.exit(1)
