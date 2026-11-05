@@ -1,8 +1,10 @@
 import sys
 import os
 import re
+import glob
 import logging
 import requests
+from datetime import datetime
 
 # --- CONFIGURACIÓN ---
 PRINTER_DATA_DIR = os.environ.get("PLR_PRINTER_DATA_DIR", "/home/pi/printer_data/gcodes")
@@ -33,7 +35,11 @@ def obtener_proximo_movimiento(fullpath, byte_pos):
         with open(fullpath, 'rb') as f:
             f.seek(byte_pos)
             future_data = f.read(32768).decode('utf-8', errors='ignore')
-            next_move = re.search(r'G[01].*(X[-+]?\d*\.?\d*|Y[-+]?\d*\.?\d*)', future_data)
+            next_move = re.search(
+                r'^G[01]\b.*(?:X[-+]?\d*\.?\d+|Y[-+]?\d*\.?\d+)',
+                future_data,
+                re.MULTILINE,
+            )
             if next_move:
                 line = next_move.group(0)
                 x_match = re.search(r'X([-+]?\d*\.?\d*)', line)
@@ -72,7 +78,7 @@ def extraer_lineas_grep(fullpath, pattern, max_bytes=300000):
 
 def buscar_desde_principio(fullpath, regex, max_bytes=150000, default=""):
     try:
-        regex_compiled = re.compile(regex)
+        regex_compiled = re.compile(regex, re.MULTILINE)
         with open(fullpath, 'rb') as f:
             chunk = f.read(max_bytes).decode('utf-8', errors='ignore')
             match = regex_compiled.search(chunk)
@@ -83,7 +89,7 @@ def buscar_desde_principio(fullpath, regex, max_bytes=150000, default=""):
 
 def buscar_desde_elfinal(fullpath, regex, max_bytes=1000000, default="250"):
     try:
-        regex_compiled = re.compile(regex)
+        regex_compiled = re.compile(regex, re.MULTILINE)
         with open(fullpath, 'rb') as f:
             f.seek(0, os.SEEK_END)
             file_size = f.tell()
@@ -98,7 +104,7 @@ def buscar_desde_elfinal(fullpath, regex, max_bytes=1000000, default="250"):
     return default
 
 def buscar_ultimo_estado(fullpath, start_byte, regex, default=""):
-    regex_compiled = re.compile(regex)
+    regex_compiled = re.compile(regex, re.MULTILINE)
     chunk_size = 65536
     current_pos = start_byte
     try:
@@ -119,7 +125,7 @@ def buscar_z_maxima_hasta_corte(fullpath, byte_pos):
     try:
         with open(fullpath, 'rb') as f:
             contenido_previo = f.read(byte_pos).decode('utf-8', errors='ignore')
-            matches = re.findall(r'G[01].*?Z([0-9.]+)', contenido_previo)
+            matches = re.findall(r'^G[01]\b.*?Z([0-9.]+)', contenido_previo, re.MULTILINE)
             if matches:
                 z_max_encontrada = max(float(z) for z in matches)
     except Exception as e:
@@ -128,8 +134,16 @@ def buscar_z_maxima_hasta_corte(fullpath, byte_pos):
 
 def generar_archivo_recuperacion(original_fullpath, filename, byte_pos, z_pos, estado, metadatos, z_offset):
     name_part, ext = os.path.splitext(filename)
-    recovery_filename = f"{name_part}_recovery{ext}"
+    sello = datetime.now().strftime("%Y%m%d-%H%M%S")
+    recovery_filename = f"{name_part}_recovery_{sello}{ext}"
     recovery_fullpath = os.path.join(PRINTER_DATA_DIR, recovery_filename)
+
+    for viejo in glob.glob(os.path.join(PRINTER_DATA_DIR, f"{name_part}_recovery_*{ext}")):
+        if os.path.basename(viejo) != recovery_filename:
+            try:
+                os.remove(viejo)
+            except OSError:
+                pass
 
     byte_limpio = alinear_byte_a_inicio_linea(original_fullpath, byte_pos)
 
@@ -149,9 +163,8 @@ def generar_archivo_recuperacion(original_fullpath, filename, byte_pos, z_pos, e
 
     # Determinar Z_UP real (Techo de todos los objetos impresos)
     z_max_objeto = buscar_z_maxima_hasta_corte(original_fullpath, byte_limpio)
-    z_segura = min(z_max_objeto + 2, z_max_maquina - 2)
-
-    if extruder_clearance > z_segura: z_segura = extruder_clearance + 2
+    # Subir 2 mm sobre lo ya impreso, con un minimo de 5 mm y sin pasar de la altura util
+    z_segura = min(max(z_max_objeto + 2.0, 5.0), z_max_maquina - 2.0)
 
     target_xy = obtener_proximo_movimiento(original_fullpath, byte_limpio)
 
@@ -232,7 +245,26 @@ def main():
         sys.exit(1)
 
     logger.info("Procesando recuperación: archivo=%s byte=%d z=%.2f z_offset=%.2f", filename, byte_pos, z_pos, z_offset)
+    byte_limpio = alinear_byte_a_inicio_linea(fullpath, byte_pos)
+    with open(fullpath, 'rb') as f:
+        cabecera = f.read(500000).decode('utf-8', errors='ignore')
 
+    marcas = [
+        cabecera.find('SET_PRINT_STATS_INFO CURRENT_LAYER=1'),
+        cabecera.find(';LAYER_CHANGE'),
+    ]
+    marcas = [m for m in marcas if m != -1]
+
+    if marcas:
+        min_byte = len(cabecera[:min(marcas)].encode('utf-8'))
+        if byte_limpio < min_byte:
+            logger.error(
+                "El corte es anterior a la primera capa util (byte %d < %d). "
+                "No se genera recuperacion: reinicia la impresion.",
+                byte_limpio, min_byte,
+            )
+            sys.exit(2)
+            
     metadatos = {
         'headers': extraer_todos_los_bloques(fullpath, "; HEADER_BLOCK_START", "; HEADER_BLOCK_END"),
         'thumbnails': extraer_todos_los_bloques(fullpath, "; THUMBNAIL_BLOCK_START", "; THUMBNAIL_BLOCK_END"),
@@ -240,10 +272,10 @@ def main():
     }
 
     estado = {
-        'total_layer': buscar_desde_principio(fullpath, r'SET_PRINT_STATS_INFO TOTAL_LAYER=\d+', None),
+        'total_layer': buscar_desde_principio(fullpath, r'SET_PRINT_STATS_INFO TOTAL_LAYER=\d+', 2000),
         'curr_layer': buscar_ultimo_estado(fullpath, byte_pos, r'SET_PRINT_STATS_INFO CURRENT_LAYER=\d+'),
-        'temp_cama': buscar_ultimo_estado(fullpath, byte_pos, r'M1[49]0.*?S([1-9]\d*(?:\.\d+)?)', None),
-        'temp_extru': buscar_ultimo_estado(fullpath, byte_pos, r'M10[49].*?S([1-9]\d*(?:\.\d+)?)', None),
+        'temp_cama': buscar_ultimo_estado(fullpath, byte_pos, r'M1[49]0.*?S([1-9]\d*(?:\.\d+)?)', "60"),
+        'temp_extru': buscar_ultimo_estado(fullpath, byte_pos, r'M10[49].*?S([1-9]\d*(?:\.\d+)?)', "200"),
         'fan': buscar_ultimo_estado(fullpath, byte_pos, r'(M10[67][^;\n\r]*)', "M107"),
         'filament': buscar_ultimo_estado(fullpath, byte_pos, r'ASSERT_ACTIVE_FILAMENT\s+ID=\d+'),
         'pa': buscar_ultimo_estado(fullpath, byte_pos, r'SET_PRESSURE_ADVANCE\s+[^;\n\r]*'),
@@ -286,7 +318,12 @@ def main():
     rec_file = generar_archivo_recuperacion(fullpath, filename, byte_pos, z_pos, estado, metadatos, z_offset)
 
     try:
-        requests.post(MOONRAKER_URL, json={"script": f'_PLR_AUTO_PRINT_RECOVERY FILE="{rec_file}"'}, timeout=10)
+        respuesta = requests.post(
+            MOONRAKER_URL,
+            json={"script": f'_PLR_AUTO_PRINT_RECOVERY FILE="{rec_file}"'},
+            timeout=10,
+        )
+        respuesta.raise_for_status()
         logger.info("Rescate exitoso: %s", rec_file)
     except Exception as e:
         logger.error("Archivo generado: %s (Error Moonraker: %s)", rec_file, e)
