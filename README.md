@@ -451,11 +451,22 @@ Normal          Fallo       Recuperación
 * **End G-code**: `_PLR_STOP`
 * **Before Layer Change**: `_PLR_Z` (opcional, mayor precisión)
 
+## Prueba de recuperación
+
+`tests/plr_recovery_test.sh` valida el flujo completo sin imprimir una pieza real: crea un G-code seco a Z=0,8, espera un guardado válido del ticker, simula el corte con `systemctl stop klipper`, arranca Klipper, ejecuta `_PLR_RECOVERY` y comprueba que el ticker se rearma y que cancelar limpia el estado.
+
+```bash
+cd ~/Klipper-PLR-Resume
+./tests/plr_recovery_test.sh
+```
+
+Requiere la impresora encendida, la cama vacía, la zona de purga (X250) despejada y `sudo` sin contraseña para `systemctl`. Tarda 4–6 minutos y termina con `N OK, 0 FAIL`. Al salir borra el G-code de prueba.
+
 ## En caso de fallo de energía
 
 1. Enciende la impresora.
 2. Aparece el mensaje: **"¿Deseas retomar la impresión desde la última capa guardada?"**
-3. Selecciona **CONTINUAR**. La impresora genera el archivo `_recovery.gcode` y reanuda automáticamente.
+3. Selecciona **CONTINUAR**. La impresora genera `<archivo>_recovery_AAAAMMDD-HHMMSS.gcode` y reanuda automáticamente.
 
 ## Advertencias
 
